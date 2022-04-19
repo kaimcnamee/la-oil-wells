@@ -1,0 +1,86 @@
+---
+title: "wells-1.1"
+author: "Kai McNamee"
+date: '2022-04-19'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(tidycensus)
+library(leaflet)
+library(areal)
+library(sf)
+```
+
+```{r read}
+# read well data and convert lng-lat to sfc point data
+
+wells <- read_csv("data/la_county_wells.csv") %>% 
+  clean_names() %>% 
+  filter(longitude != 0 & latitude != 0) %>% 
+  mutate(coord_st = map2(.x = longitude, .y = latitude, ~st_point(c(.x, .y))),
+         coord_sfc = st_sfc(coord_st, crs = 4326)) %>% 
+  select(-coord_st)
+
+# read acs 2020 data
+
+# acs.2020_vars <- load_variables(2020, "acs5")
+
+vars <- c(str_c("B02001_00", 1:8), "B03001_001")
+names(vars) <- c("population", "white", "black", "native", "asian", "other_api",
+                 "other", "two_or_more", "hispanic")
+
+acs.2020 <- get_acs(geography = "tract",
+                    state = "06",
+                    county = "037",
+                    variables = vars,
+                    geometry = T) %>% 
+  st_transform(4326)
+```
+
+```{r buffers}
+
+mile <- 1609.34
+
+# define coordinates for wells in EPSG 6432 (meter-based CRS for CA)
+
+poi <- st_transform(wells$coord_sfc, 6432)
+
+# create buffer zones of varying sizes. use st_union to combine overlapping
+# geometries -- this outputs 1 geometry feature for all of the shapes. use
+# st_cast(..., "POLYGON) to separate the geometry features -- this outputs 1
+# geometry feature per distinct boundary
+
+buffer_1 <- st_buffer(poi, mile * 0.25)
+union_1 <- st_union(buffer_1)
+split_1 <- st_cast(union_1, "POLYGON")
+
+buffer_2 <- st_buffer(poi, mile * 0.5)
+union_2 <- st_union(buffer_2)
+split_2 <- st_cast(union_2, "POLYGON")
+
+buffer_3 <- st_buffer(poi, mile * 0.75)
+union_3 <- st_union(buffer_3)
+split_3 <- st_cast(union_3, "POLYGON")
+  
+buffer_4 <- st_buffer(poi, mile * 1)
+union_4 <- st_union(buffer_4)
+split_4 <- st_cast(union_4, "POLYGON")
+
+# st_write(split_4, "shapefiles/split_4.shp")
+```
+
+```{r}
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = st_transform(split_4, 4326), fillOpacity = 0.25) 
+  # addCircleMarkers(data = wells$coord_sfc, radius = 0.1)
+  # addPolygons(data = acs.2020, 
+  #             weight = 0.5,
+  #             fillOpacity = 0.25,
+  #             opacity = 0.25)
+```
+
