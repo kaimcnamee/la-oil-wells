@@ -15,44 +15,84 @@ library(areal)
 library(sf)
 ```
 
-```{r read}
+```{r read, eval=FALSE}
+# LA County data (2019): https://data.lacounty.gov/en/dataset/Counts-and-Locations-of-Oil-Gas-Wells-in-LA-County/325t-kxpk
+
+# LA City data (2020, but labels are unclear): https://geohub.lacity.org/datasets/lahub::oil-wells-inside-la-county/about
+
 # read well data and convert lng-lat to sfc point data
 
-wells <- read_csv("data/la_county_wells.csv") %>% 
+la_wells <- read_csv("data/la_wells_county.csv") %>% 
   clean_names() %>% 
   filter(longitude != 0 & latitude != 0) %>% 
   mutate(coord_st = map2(.x = longitude, .y = latitude, ~st_point(c(.x, .y))),
-         coord_sfc = st_sfc(coord_st, crs = 4326)) %>% 
-  select(-coord_st)
+         coord_sfc = st_sfc(coord_st, crs = 4326),
+         well_status = tolower(well_status)) %>% 
+  select(-coord_st, -the_geom)
+
+st_geometry(la_wells) <- la_wells$coord_sfc
+
+saveRDS(la_wells, "data/la_wells.RDS")
 
 # read acs 2020 data
-
 # acs.2020_vars <- load_variables(2020, "acs5")
 
-vars <- c(str_c("B02001_00", 1:8), "B03001_001")
-names(vars) <- c("population", "white", "black", "native", "asian", "other_api",
-                 "other", "two_or_more", "hispanic")
+# vars <- c(str_c("B02001_00", 1:8), "B03001_001")
+# names(vars) <- c("population", "white", "black", "native", "asian", "other_api",
+#                  "other", "two_or_more", "hispanic")
+# 
+# acs_2020 <- get_acs(geography = "tract",
+#                     state = "06",
+#                     county = "037",
+#                     variables = vars,
+#                     geometry = T) %>% 
+#   st_transform(4326)
 
-acs.2020 <- get_acs(geography = "tract",
-                    state = "06",
-                    county = "037",
-                    variables = vars,
-                    geometry = T) %>% 
-  st_transform(4326)
+saveRDS(acs_2020, "data/acs_2020.RDS")
+acs_2020 <- readRDS("data/acs_2020.RDS")
 ```
 
-```{r buffers}
+```{r generate-buffers, eval=FALSE}
+
+la_wells <- readRDS("data/la_wells.RDS")
+
+well_status <- unique(la_wells$well_status)
+paste(well_status, sep = ",", collapse = NULL)
 
 mile <- 1609.34
 
-# define coordinates for wells in EPSG 6432 (meter-based CRS for CA)
+# define coordinates for wells in EPSG 6423 (meter-based CRS for CA)
 
-poi <- st_transform(wells$coord_sfc, 6432)
+get_buffers <- function(status = c(), distance){
+  
+  poi <- st_transform(la_wells$coord_sfc[la_wells$well_status %in% status], 6432)
+  
+  message("Generating buffers with radius ", distance)
+  buffer <- st_buffer(poi, distance)
+  message("Done")
+  
+  message("Merging polygons")
+  union <- st_union(buffer)
+  message("Done")
+  
+  message("Splitting polygons")
+  split <- st_cast(union, "POLYGON") %>% 
+    st_transform(4326)
+  
+  return(split)
+  
+}
+
+buffer_1 <- get_buffers(status = c("plugged", "idle", "unknown", "canceled", 
+                                   "new", "active"), 
+                        distance = mile * 0.25)
 
 # create buffer zones of varying sizes. use st_union to combine overlapping
 # geometries -- this outputs 1 geometry feature for all of the shapes. use
 # st_cast(..., "POLYGON) to separate the geometry features -- this outputs 1
 # geometry feature per distinct boundary
+
+poi <- st_transform(la_wells$coord_sfc, 6432)
 
 buffer_1 <- st_buffer(poi, mile * 0.25)
 union_1 <- st_union(buffer_1)
@@ -70,13 +110,28 @@ buffer_4 <- st_buffer(poi, mile * 1)
 union_4 <- st_union(buffer_4)
 split_4 <- st_cast(union_4, "POLYGON")
 
-# st_write(split_4, "shapefiles/split_4.shp")
+st_write(split_1, "shapefiles/buffer_1.shp")
+st_write(split_2, "shapefiles/buffer_2.shp")
+st_write(split_3, "shapefiles/buffer_3.shp")
+st_write(split_4, "shapefiles/buffer_4.shp")
 ```
+
+```{r}
+la_wells <- readRDS("data/la_wells.RDS")
+acs_2020 <- readRDS("data/acs_2020.RDS")
+
+buffer_1 <- st_read("shapefiles/buffer_1.shp") %>% st_transform(4326)
+buffer_2 <- st_read("shapefiles/buffer_2.shp") %>% st_transform(4326)
+buffer_3 <- st_read("shapefiles/buffer_3.shp") %>% st_transform(4326)
+buffer_4 <- st_read("shapefiles/buffer_4.shp") %>% st_transform(4326)
+```
+
 
 ```{r}
 leaflet() %>% 
   addProviderTiles(providers$CartoDB.Positron) %>%
-  addPolygons(data = st_transform(split_4, 4326), fillOpacity = 0.25) 
+  # addCircleMarkers(data = la_wells$coord_sfc) %>% 
+  addPolygons(data = buffer_1)
   # addCircleMarkers(data = wells$coord_sfc, radius = 0.1)
   # addPolygons(data = acs.2020, 
   #             weight = 0.5,
