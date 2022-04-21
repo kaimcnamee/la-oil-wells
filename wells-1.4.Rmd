@@ -1,0 +1,309 @@
+---
+title: "wells-1.1"
+author: "Kai McNamee"
+date: '2022-04-19'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(tidycensus)
+library(leaflet)
+library(areal)
+library(sf)
+library(crosstalk)
+# library(h3jsr)
+mile <- 1609.34
+```
+
+# Read and generate data
+
+## Read LA wells and ACS 2019 block group data
+
+```{r read, eval=FALSE}
+# LA County data (2019): https://data.lacounty.gov/en/dataset/Counts-and-Locations-of-Oil-Gas-Wells-in-LA-County/325t-kxpk
+
+# LA City data (2020, but labels are unclear): https://geohub.lacity.org/datasets/lahub::oil-wells-inside-la-county/about
+
+# read well data and convert lng-lat to sfc point data
+
+la_wells <- read_csv("data/la_wells_county.csv") %>% 
+  clean_names() %>% 
+  filter(longitude != 0 & latitude != 0) %>% 
+  mutate(coord_st = map2(.x = longitude, .y = latitude, ~st_point(c(.x, .y))),
+         coord_sfc = st_sfc(coord_st, crs = 4326),
+         well_status = tolower(well_status)) %>% 
+  rename("status" = well_status) %>% 
+  select(-coord_st, -the_geom)
+
+st_geometry(la_wells) <- la_wells$coord_sfc
+
+saveRDS(la_wells, "data/la_wells.RDS")
+saveRDS(la_wells, "wells-map/la_wells.RDS")
+
+# read acs 2019 data
+acs_2019_vars <- load_variables(2019, "acs5") %>% filter(geography == "block group")
+
+vars <- c(str_c("B02001_00", 1:8), "B03002_012")
+names(vars) <- c("population", "white", "black", "native", "asian", "other_api",
+                 "other", "two_or_more", "hispanic")
+
+acs_2019 <- get_acs(year = 2019,
+                    geography = "block group",
+                    state = "06",
+                    county = "037",
+                    variables = vars,
+                    geometry = T) %>%
+  st_transform(4326) %>% 
+  clean_names()
+
+saveRDS(acs_2019, "data/acs_2019.RDS")
+saveRDS(acs_2019, "wells-map/acs_2019.RDS")
+acs_2019 <- readRDS("data/acs_2020.RDS")
+```
+
+## Generate buffers for different well statuses
+
+```{r generate-buffers, eval=FALSE}
+la_wells <- readRDS("data/la_wells.RDS")
+
+# create buffer zones of varying sizes. use st_union to combine overlapping
+# geometries -- this outputs 1 geometry feature for all of the shapes. use
+# st_cast(..., "POLYGON) to separate the geometry features -- this outputs 1
+# geometry feature per distinct boundary
+
+get_buffers <- function(status, buffers){
+  
+  # define coordinates for wells in EPSG 6423 (meter-based CRS for CA)
+  message("Filtering by well status: ", paste(status, collapse = ", "))
+  poi <- st_transform(la_wells$coord_sfc[la_wells$well_status %in% status], 6423)
+  
+  df <- tibble()
+  
+  for (i in 1:length(buffers)) {
+    
+    # create buffer zone with input size
+    message("Generating buffers with radius ", buffers[i])
+    buffer <- st_buffer(poi, buffers[i])
+    
+    # union polygons
+    union <- st_union(buffer)
+    
+    # split unioned polygons into distinct feature
+    split <- st_cast(union, "POLYGON") 
+    
+    df <- df %>% rbind(tibble(buffer = buffers[i], geometry = split))
+    
+  }
+  
+  st_geometry(df) <- df$geometry
+  df <- st_transform(df, 4326)
+  return(df)
+  
+}
+
+well_status <- unique(la_wells$well_status)
+mile <- 1609.34
+dput(seq(0.25, 1, 0.25) * mile)
+
+buffers_all <- get_buffers(status = dput(well_status), 
+                           buffers = dput(seq(0.25, 1, 0.25) * mile))
+
+buffers_plugged <- get_buffers(status = "plugged", 
+                               buffers = dput(seq(0.25, 1, 0.25) * mile))
+
+buffers_active <- get_buffers(status = c("active", "new"),
+                              buffers = dput(seq(0.25, 1, 0.25) * mile))
+
+buffers_active_idle <- get_buffers(status = c("active", "new", "idle"),
+                                   buffers = dput(seq(0.25, 1, 0.25) * mile))
+
+buffers_idle <- get_buffers(status = c("new"),
+                            buffers = dput(seq(0.25, 1, 0.25) * mile))
+
+st_write(buffers_all, "shapefiles/buffers_all.shp")
+st_write(buffers_plugged, "shapefiles/buffers_plugged.shp")
+st_write(buffers_active, "shapefiles/buffers_active.shp")
+st_write(buffers_active_idle, "shapefiles/buffers_active_idle.shp")
+st_write(buffers_idle, "shapefiles/buffers_idle.shp")
+```
+
+## Interpolate data
+
+```{r areal, eval=FALSE}
+# read necessary data
+
+la_wells <- readRDS("data/la_wells.RDS")
+acs_2019 <- readRDS("data/acs_2019.RDS")
+
+shapefile_names <- list.files("shapefiles") %>% str_sub(end = -5) %>% unique()
+
+buffers_joined <- map_dfr(.x = shapefile_names, 
+                          ~ tibble(status = .) %>% 
+                            cbind(st_read(str_c("shapefiles/", ., ".shp"), quiet = T))) %>% 
+  mutate(status = str_remove(status, "buffers_")) %>% 
+  mutate(id = row_number()) 
+
+st_geometry(buffers_joined) <- buffers_joined$geometry
+
+# prep source data
+
+acs_clean <- acs_2019 %>% 
+  select(geoid, variable, estimate, geometry) %>% 
+  pivot_wider(names_from = variable, values_from = estimate)
+
+st_geometry(acs_clean) <- acs_clean$geometry
+acs_clean <- st_transform(acs_clean, 6423)
+
+# prep target geometries
+
+buffers_target <- buffers_joined %>% st_transform(6423)
+
+# areal interpolation
+
+ar_extensive <- names(acs_clean) %>% 
+  setdiff(c("geoid", "geometry"))
+
+ar_validate(acs_clean, buffers_target, varList = ar_extensive,
+            method = "aw", verbose = T)
+
+# buffers_target
+
+areal <- aw_interpolate(buffers_target, tid = id, 
+                        source = acs_clean, sid = geoid,
+                        weight = "sum", output = "sf",
+                        extensive = ar_extensive)
+
+saveRDS(areal, "data/buffers_ar.RDS")
+buffers_ar <- readRDS("data/buffers_ar.RDS")
+```
+
+```{r}
+buffers_ar <- readRDS("data/buffers_ar.RDS") %>% st_transform(4326) %>% 
+  mutate(across(.cols = asian:white, round))
+
+map_ar <- buffers_ar %>% 
+  mutate(prop_non_white = round((100 - (white / population * 100)), 2),
+         prop_white = round((white / population * 100), 2),
+         prop_black = round((black / population * 100), 2),
+         prop_native = round((native / population * 100), 2),
+         prop_asian = round(((asian + other_api) / population * 100), 2),
+         prop_hispanic = round((hispanic / population * 100), 2)) %>% 
+  select(-(id:white)) %>%
+  # pivot_longer(cols = prop_non_white:prop_hispanic, 
+  #              names_to = "series", values_to = "values") %>% 
+  drop_na()
+
+saveRDS(map_ar, "wells-map/map_ar.RDS")
+```
+
+```{r leaflet-test, eval=FALSE}
+
+# layer control will control which wells to show and which distance to show
+
+map_active_idle <- buffers_ar %>% 
+  filter(status == "active_idle") %>% 
+  mutate(prop_non_white = round(100 - (white / population * 100), 2)) %>% 
+  drop_na()
+
+pal <- colorNumeric(palette = "Blues", domain = map_active_idle$prop_non_white, n = 100)
+binpal <- colorBin(palette = "Blues", domain = 0:100, bins = 4)
+
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  
+  addMapPane(name = "buffers", zIndex = 1) %>% 
+  addMapPane(name = "wells", zIndex = 2) %>% 
+  
+  addPolygons(data = map_active_idle %>% 
+                filter(buffer == 1 * mile),
+              weight = 1,
+              fillOpacity = 0.8,
+              popup = ~str_c(prop_non_white, "% non white"),
+              color = ~binpal(prop_non_white),
+              
+              group = "1 mile") %>% 
+  
+  addPolygons(data = map_active_idle %>% 
+                filter(buffer == 0.5 * mile),
+              weight = 1,
+              fillOpacity = 0.8,
+              popup = ~str_c(prop_non_white, "% non white"),
+              color = ~binpal(prop_non_white),
+              
+              group = "1/2 mile") %>% 
+  
+  addPolygons(data = map_active_idle %>% 
+                filter(buffer == 0.25 * mile),
+              weight = 1,
+              fillOpacity = 0.8,
+              popup = ~str_c(prop_non_white, "% non white"),
+              color = ~binpal(prop_non_white),
+              
+              group = "1/4 mile") %>% 
+  
+  addLayersControl(baseGroups = c("1 mile", "1/2 mile", "1/4 mile"),
+                   position = "bottomright",
+                   options = layersControlOptions(collapsed = FALSE)) %>% 
+  
+  addScaleBar(position = "bottomleft") %>% 
+  
+  addLegend(data = map_active_idle, 
+            position = "bottomright",
+            pal = binpal,
+            values = ~prop_non_white,
+            title = "Percentage",
+            opacity = 1) 
+
+```
+
+```{r leaflet-shiny}
+map_ar <- readRDS("wells-map/map_ar.RDS") %>% 
+  pivot_longer(cols = prop_non_white:prop_hispanic,
+               names_to = "series", values_to = "values") 
+
+filtered_map <- map_ar %>% 
+  filter(buffer == buffer_input & status == status_input & series == "prop_white")
+
+breaks <- seq(0, 100, 25)
+
+pal <- colorNumeric(palette = "Blues", domain = 0:100)
+pal <- colorBin(palette = "Blues", domain = 0:100, bins = breaks)
+
+buffer_input <- 0.25 * mile
+status_input <- "active_idle"
+
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = filtered_map,
+              weight = 1,
+              fillOpacity = 0.8,
+              popup = ~str_c(values, "%"),
+              fillColor = ~pal(values)) %>% 
+  addLegend(data = filtered_map, 
+            position = "bottomright",
+            pal = pal,
+            values = ~values,
+            title = "Percentage",
+            opacity = 1) 
+```
+
+
+
+```{r}
+acs_clean <- acs_2020 %>% 
+  select(geoid, variable, estimate, geometry) %>% 
+  pivot_wider(names_from = variable, values_from = estimate) %>% 
+  mutate(prop_white = white / population)
+
+st_geometry(acs_clean) <- acs_clean$geometry
+```
+
+```{r}
+map_ar %>% 
+        filter(status == "active_idle" & buffer == mile * 0.25 & series == "prop_white") %>% 
+  view()
+```
+

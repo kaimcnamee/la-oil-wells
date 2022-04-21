@@ -1,0 +1,62 @@
+body, html{
+  height: 100%;
+}
+
+/* Define style for the Leaflet map */
+
+.map {
+  position: fixed;
+  top: 50px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+/* Define flex box styling to center tables in div containers. */
+
+.flex {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+
+/* Set fonts */
+
+/* 
+body, label, input, button, select { 
+  font-family: 'Helvetica', Helvetica;
+  font-weight: 200;
+}
+*/
+
+h1, h2, h3, h4 { font-weight: 400; }
+
+/* Define style for info panel */
+
+#info {
+  outline-style: hidden;
+  background-color: rgba(0, 0, 0, 0.2); 
+  padding: 10px;
+}
+
+.input:hover {
+  opacity: 1;
+  background-color: rgba(0, 0, 0, 0.6);
+}
+
+.input {
+  outline-style: hidden;
+  background-color: rgba(0, 0, 0, 0.2); 
+  padding: 10px;
+  padding-bottom: 0px;
+  width: 200px;
+  border-radius: 5px;
+  box-shadow: 1px 1px 5px #888888;
+}
+
+
+

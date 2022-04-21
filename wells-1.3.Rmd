@@ -13,6 +13,7 @@ library(tidycensus)
 library(leaflet)
 library(areal)
 library(sf)
+library(h3jsr)
 ```
 
 ```{r read, eval=FALSE}
@@ -47,7 +48,8 @@ acs_2020 <- get_acs(geography = "tract",
                     county = "037",
                     variables = vars,
                     geometry = T) %>%
-  st_transform(4326)
+  st_transform(4326) %>% 
+  clean_names()
 
 saveRDS(acs_2020, "data/acs_2020.RDS")
 acs_2020 <- readRDS("data/acs_2020.RDS")
@@ -131,20 +133,49 @@ buffers_joined <- map_dfr(.x = shapefile_names,
 st_geometry(buffers_joined) <- buffers_joined$geometry
 ```
 
-
 ```{r}
 leaflet() %>% 
-  addProviderTiles(providers$CartoDB.Positron) %>%
-  # addCircleMarkers(data = la_wells$coord_sfc) %>% 
-  addPolygons(data = buffers_joined %>% 
-                filter(buffer == mile * 0.5 & status == "active_idle"),
-              fillOpacity = 0.1,
-              weight = 0.25) %>% 
-  addCircleMarkers(data = la_wells %>% 
-                     filter(status == "active" | status == "idle"), radius = 0.1)
-  # addPolygons(data = acs.2020, 
-  #             weight = 0.5,
-  #             fillOpacity = 0.25,
-  #             opacity = 0.25)
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  addPolygons(data = buffers_joined %>% filter(status == "active_idle"),
+              weight = 0.5,
+              fillOpacity = 0.1)
+
+```
+
+
+```{r}
+acs_clean <- acs_2020 %>% 
+  select(geoid, variable, estimate, geometry) %>% 
+  pivot_wider(names_from = variable, values_from = estimate) %>% 
+  mutate(prop_white = white / population)
+
+st_geometry(acs_clean) <- acs_clean$geometry
+
+mile <- 1609.34
+```
+
+```{r}
+tracts <- c(str_c("0603726760", 0:9), str_c("0603726740", 0:9), str_c("0603726750", 0:9))
+tracts <- dput(tracts)
+
+acs_test <- acs_2020 %>% filter(geoid %in% tracts)
+
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  addPolygons(data = acs_test, 
+              fillOpacity = 0.01,
+              weight = 0.5,
+              popup = ~geoid)
+
+fillers <- polyfill(geometry = acs_test, res = 10, simple = T)
+
+point_to_h3(fillers, res = seq(10,15)) %>%
+  unlist() %>%
+  h3_to_polygon(., simple = FALSE) 
+
+
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  addPolygons(data = fillers)
 ```
 
