@@ -6,6 +6,8 @@ library(shinythemes)
 
 # read data
 
+la_county <- readRDS("shapefiles/la_county.RDS")
+
 map_ar <- readRDS("map_ar.RDS") %>% 
   pivot_longer(cols = prop_non_white:prop_hispanic,
                names_to = "series", values_to = "values") 
@@ -30,7 +32,10 @@ ui <-
                  
                  absolutePanel(top = 10, right = 10, class = "input", 
                                style = "color: white",
-                                   selectInput("pop_input",
+                               
+                               p(textOutput("selected_vars")),
+ 
+                               selectInput("pop_input",
                                            label = "Population density", 
                                            choices = c("White" = "prop_white",
                                                        "Non-White" = "prop_non_white",
@@ -40,7 +45,10 @@ ui <-
                                                        "Hispanic" = "prop_hispanic")),
                                selectInput("status_input", 
                                            label = "Well status", 
-                                           choices = c("Active or idle" = "active_idle",
+                                           choices = c("All" = "all",
+                                                       "Active" = "active", 
+                                                       "Active or idle" = "active_idle",
+                                                       "Idle" = "idle",
                                                        "Plugged" = "plugged")),
                                radioButtons("buffer_input",
                                             label = "Buffer size",
@@ -88,6 +96,27 @@ ui <-
 # Define server logic required to draw a histogram
 server <- function(input, output) {
   
+  output$selected_vars <- renderText({ 
+    paste("Displaying the density of", 
+          case_when(input$pop_input == "prop_white" ~ "White",
+                    input$pop_input == "prop_non_white" ~ "Non-White",
+                    input$pop_input == "prop_black" ~ "Black",
+                    input$pop_input == "prop_native" ~ "American Indian",
+                    input$pop_input == "prop_asian" ~ "Asian",
+                    input$pop_input == "prop_hispanic" ~ "Hispanninc"), 
+          "residents within a",
+          case_when(input$buffer_input == mile * 0.25 ~ "1/4 mile",
+                    input$buffer_input == mile * 0.5 ~ "1/2 mile",
+                    input$buffer_input == mile * 0.75 ~ "3/4 mile",
+                    input$buffer_input == mile * 1 ~ "1 mile"),
+          "radius of", ifelse(input$status_input == "active_idle", 
+                              "active and idle",
+                              input$status_input),
+          "oil wells.")
+    
+    
+  })
+  
   # create reactive function for reactive leaflet inputs
   
   filtered_map <- reactive({
@@ -101,7 +130,11 @@ server <- function(input, output) {
   output$map <- renderLeaflet({
     leaflet(options = leafletOptions(zoomControl = T)) %>% 
       addProviderTiles(providers$CartoDB.Positron) %>% 
-      # fitBounds(~min(longitude), ~min(latitude), ~max(longitude), ~max(latitude)) %>% 
+      addPolygons(data = la_county, 
+                  opacity = 0.5,
+                  fillOpacity = 0,
+                  weight = 1,
+                  color = "black") %>% 
       setView(-118.250110, 34, zoom = 10) %>% 
       addScaleBar(position = "bottomleft",
                   scaleBarOptions(maxWidth = 300)) %>% 
@@ -118,8 +151,13 @@ server <- function(input, output) {
   observe({
     
     leafletProxy("map", data = filtered_map()) %>%
-      clearShapes() %>%
-      addPolygons(weight = 1,
+      
+      # clearGroup so only buffers (not LA county lines) are redrawn when input
+      # is changed
+      
+      clearGroup(group = "buffers") %>%
+      addPolygons(group = "buffers",
+                  weight = 1,
                   fillOpacity = 0.75,
                   highlightOptions = highlightOptions(weight = 4),
                   popup = ~str_c(values, "% ", 

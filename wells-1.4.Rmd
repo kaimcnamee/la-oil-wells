@@ -59,9 +59,20 @@ acs_2019 <- get_acs(year = 2019,
   st_transform(4326) %>% 
   clean_names()
 
+la_county_shape <- get_acs(year = 2019,
+                           geography = "county",
+                           state = "06",
+                           county = "037",
+                           variables = "B02001_001",
+                           geometry = T) %>% 
+  st_transform(4326) %>% 
+  select(geometry) %>% 
+  clean_names()
+
 saveRDS(acs_2019, "data/acs_2019.RDS")
 saveRDS(acs_2019, "wells-map/acs_2019.RDS")
 acs_2019 <- readRDS("data/acs_2020.RDS")
+saveRDS(la_county_shape, "wells-map/shapefiles/la_county.RDS")
 ```
 
 ## Generate buffers for different well statuses
@@ -264,9 +275,7 @@ map_ar <- readRDS("wells-map/map_ar.RDS") %>%
   pivot_longer(cols = prop_non_white:prop_hispanic,
                names_to = "series", values_to = "values") 
 
-filtered_map <- map_ar %>% 
-  filter(buffer == buffer_input & status == status_input & series == "prop_white")
-
+la_county <- st_read("wells-map/shapefiles/la_county.shp")
 breaks <- seq(0, 100, 25)
 
 pal <- colorNumeric(palette = "Blues", domain = 0:100)
@@ -275,8 +284,12 @@ pal <- colorBin(palette = "Blues", domain = 0:100, bins = breaks)
 buffer_input <- 0.25 * mile
 status_input <- "active_idle"
 
+filtered_map <- map_ar %>% 
+  filter(buffer == buffer_input & status == status_input & series == "prop_white")
+
 leaflet() %>% 
   addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = la_county, fillOpacity = 0) %>% 
   addPolygons(data = filtered_map,
               weight = 1,
               fillOpacity = 0.8,
@@ -288,6 +301,7 @@ leaflet() %>%
             values = ~values,
             title = "Percentage",
             opacity = 1) 
+as.character(1:10)
 ```
 
 
