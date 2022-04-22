@@ -14,8 +14,9 @@ library(leaflet)
 library(areal)
 library(sf)
 library(crosstalk)
-# library(h3jsr)
+library(h3jsr)
 mile <- 1609.34
+set.seed(90025)
 ```
 
 # Read and generate data
@@ -189,12 +190,23 @@ areal <- aw_interpolate(buffers_target, tid = id,
                         extensive = ar_extensive)
 
 saveRDS(areal, "data/buffers_ar.RDS")
-buffers_ar <- readRDS("data/buffers_ar.RDS")
 ```
 
-```{r}
+```{r eval=FALSE}
 buffers_ar <- readRDS("data/buffers_ar.RDS") %>% st_transform(4326) %>% 
   mutate(across(.cols = asian:white, round))
+
+# count number of wells in each buffer polygon. st_contains returns T or F if
+# points in a vector are contained in a specified polygon -- use map function to
+# loop st_contains through all buffer polygons. 
+
+check_wells <- map_dfr(.x = buffers_ar$geometry,
+                           ~ {
+                             st_contains(.x, la_wells$coord_sfc, sparse = F) %>%
+                               apply(1, sum) %>%
+                               as_tibble_col() %>%
+                               unnest(value)
+                           })
 
 map_ar <- buffers_ar %>% 
   mutate(prop_non_white = round((100 - (white / population * 100)), 2),
@@ -204,6 +216,8 @@ map_ar <- buffers_ar %>%
          prop_asian = round(((asian + other_api) / population * 100), 2),
          prop_hispanic = round((hispanic / population * 100), 2)) %>% 
   select(-(id:white)) %>%
+  cbind(check_wells) %>% 
+  rename("wells" = value) %>% 
   # pivot_longer(cols = prop_non_white:prop_hispanic, 
   #              names_to = "series", values_to = "values") %>% 
   drop_na()
@@ -306,86 +320,210 @@ leaflet() %>%
             opacity = 1) 
 
 ```
+
 # Models
 
-```{r}
+```{r generate-sample, eval=FALSE}
 la_wells <- readRDS("data/la_wells.RDS") %>% 
   mutate(id = row_number())
+buffers_ar <- readRDS("data/buffers_ar.RDS")
 
-# count number of wells in each buffer polygon. st_contains returns T or F if
-# points in a vector are contained in a specified polygon -- use map function to
-# loop st_contains through all buffer polygons
+# analysis by distance to block group centroids is going to take too long --
+# draw a random sample from only those within 1/4 mile?
 
-# component_wells <- map_dfr(.x = buffers_ar$geometry, 
-#                            ~ {
-#                              as.tibble(st_contains(.x, la_wells$coord_sfc, sparse = F)) %>%
-#                                pivot_longer(cols = everything(),
-#                                             names_to = "well",
-#                                             values_to = "contains") %>%
-#                                summarize(total_wells = sum(contains))
-#                            })
+acs_2019 <- readRDS("data/acs_2019.RDS") %>% 
+  select(geoid, variable, estimate, geometry) %>% 
+  pivot_wider(names_from = variable, values_from = estimate) %>% 
+  mutate(prop_non_white = round((100 - (white / population * 100)), 2),
+         prop_white = round((white / population * 100), 2),
+         prop_black = round((black / population * 100), 2),
+         prop_native = round((native / population * 100), 2),
+         prop_asian = round(((asian + other_api) / population * 100), 2),
+         prop_hispanic = round((hispanic / population * 100), 2)) 
 
-# this works
-  
-component_wells <- map_dfr(.x = buffers_ar$geometry[buffers_ar$status == "plugged"],
-                       ~ {
-                         st_contains(.x, la_wells$coord_sfc, sparse = F) %>%
-                           apply(1, sum) %>% 
-                           as_tibble_col() %>% 
-                           unnest(value)
-                       })
+st_geometry(acs_2019) <- acs_2019$geometry %>% st_transform(6423)
 
-buffers_ar %>% 
-  filter(status == "plugged") %>% 
-  nrow()
+# draw random sample from wells. check sample distribution is comparable to
+# population distribution
 
-# idle: 444, active: 147, plugged: 827
+wells_sample <- sample_n(la_wells %>% 
+                           filter(!well_status %in% c("canceled", "unknown")),
+                         2000)
 
-```
+well_sample_stats <- wells_sample %>% 
+  st_drop_geometry() %>% 
+  group_by(well_status) %>% 
+  summarize(prop_sample = n()/2000 ) 
 
-```{r}
-# count number of wells in each buffer polygon. st_contains returns T or F if
-# points in a vector are contained in a specified polygon -- use map function to
-# loop st_contains through all buffer polygons. 
+well_pop_stats <- la_wells %>% 
+  st_drop_geometry() %>% 
+  filter(!well_status %in% c("canceled", "unknown")) %>% 
+  group_by(well_status) %>% 
+  summarize(count = n(), .groups = "drop") %>% 
+  mutate(prop_population = count / sum(count)) %>% 
+  select(-count)
 
-# Note: st_contains seems to be dropping repeat geometries, resulting in the
-# buffers dataframe and number of component wells vector being different
-# lengths. Solution: loop through sets of polygons by well status first
+left_join(well_pop_stats, well_sample_stats, by = "well_status")
 
-get_component_wells <- function(status_vector){
-  
-  wells_joined <- tibble(vale = numeric())
-  
-  for (i in 1:length(status_vector)) {
-    
-    message("Checking component wells for ", status_vector[[i]], " wells")
-    
-    check_wells <- map_dfr(.x = buffers_ar$geometry[buffers_ar$status == status_vector[[i]]],
+# generate 1/4 mile buffers around sampled wells, then filter acs block groups
+# to those within buffers
+
+sample_buffers <- wells_sample %>% 
+  st_transform(6423) %>% 
+  st_buffer(0.25 * mile) %>% 
+  st_union() %>% 
+  st_cast("POLYGON") %>% 
+  as_tibble()
+
+check_acs <- map_dfr(.x = acs_2019$geometry,
                            ~ {
-                             st_contains(.x, la_wells$coord_sfc, sparse = F) %>%
-                               apply(1, sum) %>%
+                             st_intersects(.x, sample_buffers$geometry, sparse = F) %>%
+                               apply(1, any) %>%
                                as_tibble_col() %>%
                                unnest(value)
                            })
-    
-    wells_joined <- rbind(wells_joined, check_wells)
-    
-  }
 
-  return(wells_joined)
-  
-}
+acs_sample <- cbind(check_acs, acs_2019) %>% 
+  filter(value == T) %>% 
+  select(-value) 
 
-x <- get_component_wells(c("active", "plugged"))
+st_geometry(acs_sample) <- acs_sample$geometry
 
+saveRDS(wells_sample, "data/wells_sample.RDS")
+st_write(sample_buffers, "shapefiles/sample_buffers.shp")
+saveRDS(acs_sample, "data/acs_sample.RDS")
+```
 
+```{r}
+wells_sample <- readRDS("data/wells_sample.RDS") %>% 
+  st_transform(4326)
+sample_buffers <- st_read("shapefiles/sample_buffers.shp")%>% 
+  st_transform(4326)
+acs_sample <- readRDS("data/acs_sample.RDS") %>%
+  st_transform(4326)
 
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(data = acs_sample,
+              weight = 0.5,
+              popup = ~geoid) %>% 
+  addPolygons(data = sample_buffers$geometry, 
+              fillOpacity = 0,
+              color = "red",
+              weight = 3)
+```
+```{r}
+# test: subdivide blocks into h3 hexagons
 
+# h <- acs_sample %>% filter(geoid == "060372674022")
+# h_fill <- polyfill(h, res = 10, simple = FALSE)
+# h_fill <- h3_to_polygon(unlist(h_fill$h3_polyfillers), simple = FALSE)
 
-mat <- st_contains(buffers_ar$geometry[4], la_wells$coord_sfc, sparse = F)
-apply(mat, 1, sum)
+# generate hexagons to subdivide block groups and interpolate census data 
 
-# x <- map(.x = la_wells %>% filter(well_status == "active_idle") %>% select(coord_sfc),
-#          ~st_contains(buffers_ar$geometry[1]), .)
+acs_fill <- polyfill(acs_sample, res = 10, simple = FALSE)
+acs_fill_polygons <- h3_to_polygon(unlist(acs_fill$h3_polyfillers), simple = F)
+
+leaflet() %>% 
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  # addPolygons(data = h,
+  #             weight = 0.5,
+  #             popup = ~geoid) %>% 
+  addPolygons(data = acs_fill_polygons %>% slice(1:500))
+
+# interpolate acs_sample data into h3 hexagons
+
+ar_sample_target <- acs_fill_polygons %>% st_transform(6423)
+ar_sample_source <- acs_sample %>% st_transform(6423)
+ar_sample_ext <- names(acs_sample)[2:9] 
+
+ar_validate(ar_sample_source, ar_sample_target, varList = ar_sample_ext,
+            method = "aw", verbose = T)
+
+# buffers_target
+
+areal_sample <- aw_interpolate(ar_sample_target, tid = h3_address,
+                               source = ar_sample_source, sid = geoid,
+                               weight = "sum", output = "sf",
+                               extensive = ar_sample_ext)
+
+saveRDS(areal_sample, "data/areal_sample_h3.RDS")
+```
+
+```{r h3-distances, eval=FALSE}
+# calculate distances with EPSG 6423
+
+areal_sample <- readRDS("data/areal_sample_h3.RDS")
+areal_sample_points <- h3_to_point(areal_sample$h3_address, simple = F) %>% st_transform(6423)
+
+# define subsets of wells so that st_distance can retain well status
+
+plugged_sample <- wells_sample$coord_sfc[wells_sample$well_status == "plugged"] %>% 
+  st_as_sf() %>% st_transform(6423)
+
+idle_sample <- wells_sample$coord_sfc[wells_sample$well_status == "idle"] %>% 
+  st_as_sf() %>% st_transform(6423)
+
+new_sample <- wells_sample$coord_sfc[wells_sample$well_status == "new"] %>% 
+  st_as_sf() %>% st_transform(6423)
+
+active_sample <- wells_sample$coord_sfc[wells_sample$well_status == "active"] %>% 
+  st_as_sf() %>% st_transform(6423)
+
+# calculate distance matrices
+
+plugged_distance <- as_tibble(st_distance(areal_sample_points, plugged_sample$x)) %>%
+  clean_names() %>%
+  mutate(h3_address = areal_sample_points$h3_address, .before = v1)
+
+idle_distance <- as_tibble(st_distance(areal_sample_points, idle_sample$x)) %>%
+  clean_names() %>%
+  mutate(h3_address = areal_sample_points$h3_address, .before = v1)
+
+new_distance <- as_tibble(st_distance(areal_sample_points, new_sample$x)) %>%
+  clean_names() %>%
+  mutate(h3_address = areal_sample_points$h3_address, .before = v1)
+
+ative_distance <- as_tibble(st_distance(areal_sample_points, active_sample$x)) %>%
+  clean_names() %>%
+  mutate(h3_address = areal_sample_points$h3_address, .before = v1)
+
+# pivot distance matrices to extract minimum distance for each well type
+
+plugged_min <- plugged_distance %>% 
+  pivot_longer(2:ncol(.), names_to = "well", values_to = "distance") %>% 
+  group_by(h3_address) %>% 
+  filter(distance == min(distance))
+
+idle_min <- idle_distance %>% 
+  pivot_longer(2:ncol(.), names_to = "well", values_to = "distance") %>% 
+  group_by(h3_address) %>% 
+  filter(distance == min(distance))
+
+new_min <- plugged_distance %>% 
+  pivot_longer(2:ncol(.), names_to = "well", values_to = "distance") %>% 
+  group_by(h3_address) %>% 
+  filter(distance == min(distance))
+
+active_min <- plugged_distance %>% 
+  pivot_longer(2:ncol(.), names_to = "well", values_to = "distance") %>% 
+  group_by(h3_address) %>% 
+  filter(distance == min(distance))
+
+# join distances with interpolated h3 data
+
+areal_sample_joined <- areal_sample %>% 
+  left_join(plugged_min %>% select(-well) %>% by = "h3_address") %>% 
+  left_join(idle_min %>% select(-well), by = "h3_address") %>%
+  left_join(new_min %>% select(-well), by = "h3_address") %>%
+  left_join(active_min %>% select(-well), by = "h3_address") 
+
+names(areal_sample_joined)[11:14] <- c("plugged", "idle", "new", "active")
+
+saveRDS(areal_sample_joined, "data/areal_sample_joined.RDS")
+```
+
+```{r}
+areal_sample_joined <- readRDS("data/areal_sample_joined.RDS")
 ```
 
